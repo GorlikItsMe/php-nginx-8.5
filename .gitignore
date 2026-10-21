@@ -1,0 +1,5 @@
+vendor-docker-php/
+vendor-webdevops/
+*.log
+.DS_Store
+Thumbs.db

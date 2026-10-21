@@ -1,0 +1,83 @@
+name: Build and publish php-nginx
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  PHP_VERSION: "8.5.12"
+  TAG_MINOR: "8.5"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Image name (lowercase for GHCR)
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY_OWNER,,}/php-nginx" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build official PHP ${{ env.PHP_VERSION }} FPM
+        run: |
+          docker build \
+            -t php:${{ env.TAG_MINOR }}-fpm-bookworm \
+            -t php:${{ env.TAG_MINOR }}-fpm \
+            ./docker/php-fpm
+
+      - name: Build webdevops/php:${{ env.TAG_MINOR }}
+        run: |
+          docker build \
+            -t webdevops/php:${{ env.TAG_MINOR }} \
+            -t webdevops/php-official:${{ env.TAG_MINOR }} \
+            ./docker/php
+
+      - name: Build php-nginx
+        run: |
+          docker build \
+            -t webdevops/php-nginx:${{ env.TAG_MINOR }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG_MINOR }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.PHP_VERSION }} \
+            ./docker/php-nginx
+
+      - name: Verify PHP version
+        run: |
+          ACTUAL="$(docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG_MINOR }} php -r 'echo PHP_VERSION;')"
+          echo "PHP version: ${ACTUAL}"
+          test "${ACTUAL}" = "${{ env.PHP_VERSION }}"
+
+      - name: Smoke test nginx + php-fpm
+        run: |
+          CID="$(docker run -d -p 8080:80 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG_MINOR }})"
+          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/ >/dev/null 2>&1 || curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ | grep -Eq '200|403|404'; then
+              echo "HTTP endpoint responded"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Container logs:" >&2
+          docker logs "$CID" >&2
+          exit 1
+
+      - name: Push images
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG_MINOR }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.PHP_VERSION }}
